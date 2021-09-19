@@ -6,6 +6,7 @@ package refactor
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -23,6 +24,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"golang.org/x/tools/go/packages"
 )
 
 type Snapshot struct {
@@ -247,81 +250,115 @@ func (r *Refactor) Load() (*Snapshot, error) {
 			files: make(map[string]*File),
 		},
 	}
+	if true {
+		cfg := &packages.Config{
+			Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.LoadFiles | packages.NeedImports | packages.NeedDeps,
 
-	for {
-		var jp jsonPackage
-		err := dec.Decode(&jp)
-		if err == io.EOF {
-			break
+			Context: context.Background(),
+
+			Fset: fset,
+
+			Tests: true,
 		}
+		pkgs, err := packages.Load(cfg, "./...")
 		if err != nil {
-			return nil, fmt.Errorf("loading packages: %v", err)
+			return nil, fmt.Errorf("could not query packages: %w", err)
 		}
-		if jp.Name == "" {
-			continue
-		}
-
-		// The forms we expect to see are:
-		//	p (the regular package)
-		//	p [p.test] (p compiled with test code for the test binary)
-		//	p_test [p.test] (p_test compiled for the test binary)
-		id := jp.ImportPath
-		pkgPath := strings.TrimSuffix(id, " ["+jp.ForTest+".test]")
-		if strings.HasSuffix(pkgPath, ".test") {
-			// Ignore test binaries.
-			continue
-		}
-		p := s.pkgByID[id]
-		if p == nil {
-			p = new(Package)
-			s.pkgByID[id] = p
-		}
-		p.Name = jp.Name
-		p.Dir = jp.Dir
-		p.ID = id
-		p.PkgPath = pkgPath
-		p.ForTest = jp.ForTest
-
-		// Remember the target package,
-		// which is the one in the current directory.
-		// If it is compiled twice, once with test code and once without,
-		// then prefer the one with test code, which should be strictly larger.
-		if p.Dir == dir && !strings.HasSuffix(p.PkgPath, "_test") && (p.ForTest != "" || s.target == nil) {
-			s.target = p
-		}
-		p.InCurrentModule = !jp.DepOnly
-		p.Export = jp.Export
-		p.ImportIDs = jp.Imports
-		p.ImportMap = jp.ImportMap
-		if len(p.Files) > 0 {
-			// We see the same packages multiple times
-			// under certain error conditions, like import cycles.
-			continue
-		}
-		if false && !p.InCurrentModule && p.Export != "" {
-			// Outside current module, so not updating.
-			// Load from export data.
-			// Don't bother with source files.
-			continue
-		}
-
-		// Set up for loading from source code.
-		p.Export = "" // Remember NOT to load from export data.
-		for _, name := range jp.CompiledGoFiles {
-			if strings.HasSuffix(name, ".s") { // surprise!
+		for _, pkg := range pkgs {
+			if pkg.Name == "" {
 				continue
 			}
-			if !filepath.IsAbs(name) {
-				name = filepath.Join(p.Dir, name)
+			// "internal/abi"
+			// "rsc.io/rf [rsc.io/rf.test]"
+			id := pkg.ID
+			pkgPath := pkg.PkgPath
+			if strings.HasSuffix(pkgPath, ".test") {
+				continue
 			}
-			name = s.r.shortPath(name)
-			f, err := s.cache.newFile(name)
+			p := s.pkgByID[id]
+			if p == nil {
+				p = new(Package)
+				s.pkgByID[id] = p
+			}
+			p.Name = pkg.Name
+		}
+	}
+	if false {
+		for {
+			var jp jsonPackage
+			err := dec.Decode(&jp)
+			if err == io.EOF {
+				break
+			}
 			if err != nil {
-				s.saveErrors(err)
+				return nil, fmt.Errorf("loading packages: %v", err)
+			}
+			if jp.Name == "" {
 				continue
 			}
-			p.Files = append(p.Files, f)
-			s.files[f.Name] = f
+
+			// The forms we expect to see are:
+			//	p (the regular package)
+			//	p [p.test] (p compiled with test code for the test binary)
+			//	p_test [p.test] (p_test compiled for the test binary)
+			id := jp.ImportPath
+			pkgPath := strings.TrimSuffix(id, " ["+jp.ForTest+".test]")
+			if strings.HasSuffix(pkgPath, ".test") {
+				// Ignore test binaries.
+				continue
+			}
+			p := s.pkgByID[id]
+			if p == nil {
+				p = new(Package)
+				s.pkgByID[id] = p
+			}
+			p.Name = jp.Name
+			p.Dir = jp.Dir
+			p.ID = id
+			p.PkgPath = pkgPath
+			p.ForTest = jp.ForTest
+
+			// Remember the target package,
+			// which is the one in the current directory.
+			// If it is compiled twice, once with test code and once without,
+			// then prefer the one with test code, which should be strictly larger.
+			if p.Dir == dir && !strings.HasSuffix(p.PkgPath, "_test") && (p.ForTest != "" || s.target == nil) {
+				s.target = p
+			}
+			p.InCurrentModule = !jp.DepOnly
+			p.Export = jp.Export
+			p.ImportIDs = jp.Imports
+			p.ImportMap = jp.ImportMap
+			if len(p.Files) > 0 {
+				// We see the same packages multiple times
+				// under certain error conditions, like import cycles.
+				continue
+			}
+			if false && !p.InCurrentModule && p.Export != "" {
+				// Outside current module, so not updating.
+				// Load from export data.
+				// Don't bother with source files.
+				continue
+			}
+
+			// Set up for loading from source code.
+			p.Export = "" // Remember NOT to load from export data.
+			for _, name := range jp.CompiledGoFiles {
+				if strings.HasSuffix(name, ".s") { // surprise!
+					continue
+				}
+				if !filepath.IsAbs(name) {
+					name = filepath.Join(p.Dir, name)
+				}
+				name = s.r.shortPath(name)
+				f, err := s.cache.newFile(name)
+				if err != nil {
+					s.saveErrors(err)
+					continue
+				}
+				p.Files = append(p.Files, f)
+				s.files[f.Name] = f
+			}
 		}
 	}
 	s.packages = packagesOf(s.pkgByID)
